@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<!--
+  Derived from preview.html in Pinrail (desktop/core/src/api/preview.html).
+  Copyright Pinrail contributors. Licensed under the Apache License, Version 2.0;
+  you may not use this file except in compliance with the License. You may
+  obtain a copy at http://www.apache.org/licenses/LICENSE-2.0. Unless required
+  by applicable law or agreed to in writing, software distributed under the
+  License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS
+  OF ANY KIND, either express or implied.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Pinrail review</title>
+<link rel="stylesheet" href="/sdk/v1/pinrail-plugin.css">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column; background: var(--pinrail-bg); color: var(--pinrail-text); }
+  header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 12px 18px; border-bottom: 1px solid var(--pinrail-border); }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+  header .meta { color: var(--pinrail-dim); font-size: 12px; }
+  header .about { flex-basis: 100%; color: var(--pinrail-faint); font-size: 12px; }
+  main { flex: 1; min-height: 0; overflow: auto; }
+  main { display: flex; }
+  iframe { display: block; flex: 1; width: 100%; border: 0; }
+  footer { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; padding: 10px 18px; border-top: 1px solid var(--pinrail-border); }
+  footer label { display: flex; flex-direction: column; gap: 4px; color: var(--pinrail-dim); font-size: 12px; }
+  footer label.note { flex: 1; min-width: 200px; }
+  footer input, footer textarea { font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--pinrail-border); border-radius: 6px; background: var(--pinrail-bg-raised, var(--pinrail-bg)); color: var(--pinrail-text); }
+  footer textarea { min-height: 34px; resize: vertical; }
+  footer button { padding: 8px 14px; border: 0; border-radius: 6px; background: var(--pinrail-accent); color: #fff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+  footer button:disabled { opacity: 0.5; cursor: default; }
+  .decided { color: var(--pinrail-dim); font-size: 13px; }
+  #result { padding: 10px 18px 0; border-top: 1px solid var(--pinrail-border); font-size: 13px; }
+  #result p { margin: 0 0 6px; }
+  #result.ok p { color: var(--pinrail-success, #2a7); }
+  #result pre { max-height: 180px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--pinrail-border); border-radius: 6px; font-size: 12px; }
+  footer .hint { flex-basis: 100%; color: var(--pinrail-faint); font-size: 12px; }
+  footer details.note { flex: 1; min-width: 200px; }
+  footer summary { display: none; color: var(--pinrail-dim); font-size: 12px; cursor: pointer; }
+  footer details.note label { margin-top: 6px; }
+  @supports (height: 100dvh) { body { height: 100dvh; } }
+  @media (hover: none) { footer .hint { display: none; } }
+  @media (max-width: 640px) {
+    header { flex-wrap: nowrap; align-items: center; padding: 6px 12px; }
+    header h1 { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    header .meta { display: none; }
+    footer { flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px; }
+    footer label.name { flex: 1; min-width: 0; order: 1; }
+    footer label.name span { display: none; }
+    footer input { min-width: 0; }
+    footer button { order: 2; flex: 0 1 auto; max-width: 60%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    footer details.note { order: 3; flex-basis: 100%; }
+    footer summary { display: block; }
+    footer .hint { order: 4; }
+  }
+  .error { padding: 24px 18px; color: var(--pinrail-danger, #c33); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Loading…</h1>
+  <span class="meta" id="meta"></span>
+</header>
+<main><iframe id="view" sandbox="allow-scripts" title="The plugin's view"></iframe></main>
+<section id="result" hidden aria-live="polite"><p></p><pre></pre></section>
+<footer id="foot">
+  <label class="name"><span>Your name</span> <input type="text" id="name" placeholder="Your name" required maxlength="80" autocomplete="name"></label>
+  <details class="note" id="notebox"><summary>Add a note</summary><label class="note">Note to the agent (optional) <textarea id="note" rows="1"></textarea></label></details>
+  <button type="button" id="handover" disabled>Send decision</button>
+  <span class="hint">⌘/Ctrl+Enter presses it too.</span>
+</footer>
+<script type="module">
+import { connectFrame } from "/preview/host.js";
+
+const TOKEN = "__TOKEN__";
+const api = (path) => `/x/${TOKEN}/${path}`;
+const frame = document.getElementById("view");
+const button = document.getElementById("handover");
+const nameInput = document.getElementById("name");
+const noteInput = document.getElementById("note");
+let review = null, previous = null, settings = {}, sent = false;
+
+// the note is always open on wide screens, a tap away on narrow ones
+const narrow = matchMedia("(max-width: 640px)");
+const notebox = document.getElementById("notebox");
+const fitNote = () => { notebox.open = !narrow.matches; };
+fitNote();
+narrow.addEventListener("change", fitNote);
+
+nameInput.value = localStorage.getItem("homing-name") || "";
+
+// a link a view asks for opens out in the world, never back to this machine
+const followable = (url) => {
+  try {
+    const { protocol, hostname } = new URL(url);
+    return /^(https?|mailto):$/.test(protocol) && !/^(localhost|.+\.localhost|127(\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\])$/i.test(hostname);
+  } catch {
+    return false;
+  }
+};
+const theme = () => (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+const json = async (path, options) => {
+  const response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options && options.headers) } });
+  const body = response.status === 204 ? null : await response.json().catch(() => null);
+  return { ok: response.ok, status: response.status, body };
+};
+const readonly = () => sent || !review || review.status !== "pending";
+
+function showDecided(text) {
+  const foot = document.getElementById("foot");
+  foot.innerHTML = "";
+  const line = document.createElement("span");
+  line.className = "decided";
+  line.textContent = text || (review.status === "decided" ? "Decided." : `This review is ${review.status}.`);
+  foot.append(line);
+}
+
+/** What the result area says. */
+function result(ok, text, data) {
+  const area = document.getElementById("result");
+  area.hidden = false;
+  area.className = ok ? "ok" : "";
+  area.querySelector("p").textContent = text;
+  const pre = area.querySelector("pre");
+  pre.hidden = data === undefined;
+  pre.textContent = data === undefined ? "" : JSON.stringify(data, null, 2);
+}
+
+const host = connectFrame(frame, {
+  origin: location.origin,
+  review: () => review,
+  previous: () => previous,
+  readonly,
+  settings: () => settings,
+  theme,
+  label: (text) => (button.textContent = `Send: ${text}`),
+  open: (url) => {
+    if (followable(url)) window.open(url, "_blank", "noreferrer");
+  },
+  file: async (from, listed) => {
+    const response = await fetch(api(`attachments/${encodeURIComponent(listed.name)}`));
+    if (!response.ok) throw new Error(`could not fetch ${listed.name}`);
+    return response.arrayBuffer();
+  },
+  // The view's decision goes to the agent. A schema error goes back to the
+  // view, which can go on editing.
+  handOver: async (data) => {
+    const name = nameInput.value.trim();
+    if (!name) {
+      result(false, "Enter your name first.");
+      nameInput.focus();
+      return { ok: false, violations: [] };
+    }
+    localStorage.setItem("homing-name", name);
+    button.disabled = true;
+    try {
+      const note = noteInput.value.trim();
+      const { ok, status, body } = await json(api("decision"), { method: "POST", body: JSON.stringify({ data, name, note: note || undefined }) });
+      if (ok) {
+        sent = true;
+        host.changed();
+        showDecided("Decision sent. You can close this page.");
+        result(true, "Decision sent. You can close this page.");
+        return { ok: true, decision: { data, decided_by: `${name} (via homing)`, decided_at: new Date().toISOString() } };
+      }
+      if (status === 409) {
+        sent = true;
+        host.changed();
+        showDecided("This review is no longer pending.");
+        result(false, "This review is no longer pending.");
+        return { ok: false, violations: [] };
+      }
+      const errors = (body && body.violations) || [{ path: "", message: (body && body.message) || "The decision was refused." }];
+      result(false, `The decision fails the plugin's schema: ${errors.length === 1 ? "1 violation" : errors.length + " violations"}, sent back to the view.`);
+      return { ok: false, violations: errors };
+    } finally {
+      if (!readonly()) button.disabled = false;
+    }
+  },
+});
+
+button.addEventListener("click", () => host.collect());
+window.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault();
+    host.collect();
+  }
+});
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
+  document.documentElement.dataset.theme = theme();
+  host.appearance(theme());
+});
+
+(async () => {
+  document.documentElement.dataset.theme = theme();
+  const found = await json(api("review"));
+  if (!found.ok) {
+    document.querySelector("main").innerHTML = "";
+    const error = document.createElement("p");
+    error.className = "error";
+    error.textContent = "This review could not be found.";
+    document.querySelector("main").append(error);
+    document.getElementById("title").textContent = "Not found";
+    return;
+  }
+  review = found.body;
+  if (review.revises) {
+    const earlier = await json(api("previous"));
+    previous = earlier.ok ? earlier.body : null;
+  }
+  // the review opened, on the version of its plugin it renders with now,
+  // and the plugin's settings as they stand
+  const view = await json(api("view"), { method: "POST" });
+  if (view.ok && view.body.review) review = view.body.review;
+  const installed = await json(api("settings"));
+  settings = (installed.ok && installed.body && installed.body.settings) || {};
+  document.title = `${review.title} · Pinrail`;
+  document.getElementById("title").textContent = review.title;
+  document.getElementById("meta").textContent = `${review.plugin} ${review.plugin_version} · ${review.status}`;
+  if (readonly()) showDecided();
+  else button.disabled = false;
+  if (view.ok) frame.src = view.body.url;
+})();
+</script>
+</body>
+</html>
